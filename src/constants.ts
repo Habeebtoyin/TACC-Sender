@@ -6,6 +6,14 @@ interface ContractsConfig {
 }
 
 export const chainsToTSender: ContractsConfig = {
+      97: {
+        tsender: "0x117346230fF2344cF406F8C987C4bda99072f5fE",
+        no_check: null,
+    },
+     56: {
+        tsender: "0x688Dfd13204794f731AC86739B987ad40033c000",
+        no_check: null,
+    },
     324: {
         tsender: "0x7e645Ea4386deb2E9e510D805461aA12db83fb5E",
         no_check: null,

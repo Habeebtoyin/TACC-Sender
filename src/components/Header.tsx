@@ -10,7 +10,7 @@ export default function Header() {
             <div className="flex items-center gap-2.5 md:gap-6">
                 <a href="/" className="flex items-center gap-1 text-zinc-800">
                     <Image src="/T-Sender.svg" alt="TSender" width={36} height={36} />
-                    <h1 className="font-bold text-2xl hidden md:block">TSender</h1>
+                    <h1 className="font-bold text-2xl hidden md:block">Tacc-Sender</h1>
                 </a>
                 <a
                     href="https://github.com/cyfrin/TSender"

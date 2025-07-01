@@ -1,3 +1,4 @@
+// Vibe Code Version
 "use client"
 
 import { useState, useMemo, useEffect } from "react"
@@ -13,7 +14,7 @@ import { chainsToTSender, tsenderAbi, erc20Abi } from "@/constants"
 import { readContract } from "@wagmi/core"
 import { useConfig } from "wagmi"
 import { CgSpinner } from "react-icons/cg"
-import { calculateTotal, formatTokenAmount } from "@/utils"
+import { formatTokenAmount } from "@/utils"
 import { InputForm } from "./ui/InputField"
 import { Tabs, TabsList, TabsTrigger } from "./ui/Tabs"
 import { waitForTransactionReceipt } from "@wagmi/core"
@@ -58,20 +59,48 @@ export default function AirdropForm({ isUnsafeMode, onModeChange }: AirdropFormP
         hash,
     })
 
-    const total: number = useMemo(() => calculateTotal(amounts), [amounts])
+     // Get token decimals
+    const decimals = tokenData?.[0]?.result as number | undefined;
 
+    const totalInWei = useMemo(() => {
+        if (!decimals) return BigInt(0);
+        
+        return amounts.split(/[,\n]+/)
+            .map(amt => amt.trim())
+            .filter(amt => amt !== '')
+            .reduce((sum, amt) => {
+                try {
+                    // Convert whole number to wei
+                    const amountWei = BigInt(parseFloat(amt) * 10 ** decimals);
+                    return sum + amountWei;
+                } catch {
+                    return sum;
+                }
+            }, BigInt(0));
+    }, [amounts, decimals]);
 
     async function handleSubmit() {
+
+         if (!decimals) {
+            alert("Token decimals not available");
+            return;
+        }
         const contractType = isUnsafeMode ? "no_check" : "tsender"
         const tSenderAddress = chainsToTSender[chainId][contractType]
         const result = await getApprovedAmount(tSenderAddress)
 
-        if (result < total) {
+                // Convert input amounts to wei
+        const amountsWei = amounts.split(/[,\n]+/)
+            .map(amt => amt.trim())
+            .filter(amt => amt !== '')
+            .map(amt => BigInt(parseFloat(amt) * 10 ** decimals));
+
+        if (Number(result) < Number(totalInWei) ){
             const approvalHash = await writeContractAsync({
                 abi: erc20Abi,
                 address: tokenAddress as `0x${string}`,
                 functionName: "approve",
-                args: [tSenderAddress as `0x${string}`, BigInt(total)],
+                args: [tSenderAddress as `0x${string}`, totalInWei],
             })
             const approvalReceipt = await waitForTransactionReceipt(config, {
                 hash: approvalHash,
@@ -87,8 +116,8 @@ export default function AirdropForm({ isUnsafeMode, onModeChange }: AirdropFormP
                     tokenAddress,
                     // Comma or new line separated
                     recipients.split(/[,\n]+/).map(addr => addr.trim()).filter(addr => addr !== ''),
-                    amounts.split(/[,\n]+/).map(amt => amt.trim()).filter(amt => amt !== ''),
-                    BigInt(total),
+                     amountsWei, // Use converted wei amounts
+                    totalInWei,
                 ],
             })
         } else {
@@ -100,18 +129,18 @@ export default function AirdropForm({ isUnsafeMode, onModeChange }: AirdropFormP
                     tokenAddress,
                     // Comma or new line separated
                     recipients.split(/[,\n]+/).map(addr => addr.trim()).filter(addr => addr !== ''),
-                    amounts.split(/[,\n]+/).map(amt => amt.trim()).filter(amt => amt !== ''),
-                    BigInt(total),
+                    amountsWei, // Use converted wei amounts
+                    totalInWei,
                 ],
             },)
         }
 
     }
 
-    async function getApprovedAmount(tSenderAddress: string | null): Promise<number> {
+    async function getApprovedAmount(tSenderAddress: string | null): Promise<BigInt> {
         if (!tSenderAddress) {
             alert("This chain only has the safer version!")
-            return 0
+            return BigInt(0)
         }
         const response = await readContract(config, {
             abi: erc20Abi,
@@ -119,7 +148,7 @@ export default function AirdropForm({ isUnsafeMode, onModeChange }: AirdropFormP
             functionName: "allowance",
             args: [account.address, tSenderAddress as `0x${string}`],
         })
-        return response as number
+        return response as BigInt
     }
 
     function getButtonContent() {
@@ -174,13 +203,13 @@ export default function AirdropForm({ isUnsafeMode, onModeChange }: AirdropFormP
     }, [amounts])
 
     useEffect(() => {
-        if (tokenAddress && total > 0 && tokenData?.[2]?.result as number !== undefined) {
-            const userBalance = tokenData?.[2].result as number;
-            setHasEnoughTokens(userBalance >= total);
+        if (tokenAddress && totalInWei > 0 && tokenData?.[2]?.result !== undefined) {
+            const userBalance = tokenData?.[2].result as bigint;
+            setHasEnoughTokens(userBalance >= totalInWei);
         } else {
             setHasEnoughTokens(true);
         }
-    }, [tokenAddress, total, tokenData]);
+    }, [tokenAddress, totalInWei, tokenData]);
 
     return (
         <div
@@ -233,12 +262,16 @@ export default function AirdropForm({ isUnsafeMode, onModeChange }: AirdropFormP
                         </div>
                         <div className="flex justify-between items-center">
                             <span className="text-sm text-zinc-600">Amount (wei):</span>
-                            <span className="font-mono text-zinc-900">{total}</span>
+                            <span className="font-mono text-zinc-900">{totalInWei.toString()}</span>
                         </div>
                         <div className="flex justify-between items-center">
                             <span className="text-sm text-zinc-600">Amount (tokens):</span>
                             <span className="font-mono text-zinc-900">
-                                {formatTokenAmount(total, tokenData?.[0]?.result as number)}
+                              {amounts.split(/[,\n]+/)
+                                    .map(amt => amt.trim())
+                                    .filter(amt => amt !== '')
+                                    .reduce((sum, amt) => sum + parseFloat(amt || '0'), 0)
+                                    .toLocaleString()}
                             </span>
                         </div>
                     </div>
