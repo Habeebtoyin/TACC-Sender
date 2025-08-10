@@ -18,6 +18,7 @@ import { formatTokenAmount } from "@/utils"
 import { InputForm } from "./ui/InputField"
 import { Tabs, TabsList, TabsTrigger } from "./ui/Tabs"
 import { waitForTransactionReceipt } from "@wagmi/core"
+import { parseUnits } from 'viem'
 
 interface AirdropFormProps {
     isUnsafeMode: boolean
@@ -47,11 +48,12 @@ export default function AirdropForm({ isUnsafeMode, onModeChange }: AirdropFormP
                 abi: erc20Abi,
                 address: tokenAddress as `0x${string}`,
                 functionName: "balanceOf",
-                args: [account.address],
+                args: [account.address!],
             },
         ],
     })
     const [hasEnoughTokens, setHasEnoughTokens] = useState(true)
+    const [amountsError, setAmountsError] = useState<string | null>(null)
 
     const { data: hash, isPending, error, writeContractAsync } = useWriteContract()
     const { isLoading: isConfirming, isSuccess: isConfirmed, isError } = useWaitForTransactionReceipt({
@@ -59,96 +61,119 @@ export default function AirdropForm({ isUnsafeMode, onModeChange }: AirdropFormP
         hash,
     })
 
-     // Get token decimals
+    // Get token decimals
     const decimals = tokenData?.[0]?.result as number | undefined;
 
-    const totalInWei = useMemo(() => {
-        if (!decimals) return BigInt(0);
+    const { totalInWei, amountsValid } = useMemo(() => {
+        if (!decimals) return { totalInWei: BigInt(0), amountsValid: true };
         
-        return amounts.split(/[,\n]+/)
+        let total = BigInt(0);
+        let isValid = true;
+        const amountsArray = amounts.split(/[,\n]+/)
             .map(amt => amt.trim())
-            .filter(amt => amt !== '')
-            .reduce((sum, amt) => {
-                try {
-                    // Convert whole number to wei
-                    const amountWei = BigInt(parseFloat(amt) * 10 ** decimals);
-                    return sum + amountWei;
-                } catch {
-                    return sum;
-                }
-            }, BigInt(0));
+            .filter(amt => amt !== '');
+        
+        for (const amt of amountsArray) {
+            try {
+                total += parseUnits(amt, decimals);
+            } catch (error) {
+                isValid = false;
+            }
+        }
+        
+        return { totalInWei: total, amountsValid: isValid };
     }, [amounts, decimals]);
 
     async function handleSubmit() {
-
-         if (!decimals) {
+        if (!decimals) {
             alert("Token decimals not available");
             return;
         }
+        
         const contractType = isUnsafeMode ? "no_check" : "tsender"
         const tSenderAddress = chainsToTSender[chainId][contractType]
+        
+        if (!tSenderAddress) {
+            alert("This chain only has the safer version!");
+            return;
+        }
+
+        // Prepare recipients and amounts lists
+        const recipientsList = recipients.split(/[,\n]+/)
+            .map(addr => addr.trim())
+            .filter(addr => addr !== '');
+            
+        const amountsList = amounts.split(/[,\n]+/)
+            .map(amt => amt.trim())
+            .filter(amt => amt !== '');
+
+        // Validate inputs
+        if (recipientsList.length === 0 || amountsList.length === 0) {
+            alert("Recipients and amounts cannot be empty");
+            return;
+        }
+        
+        if (recipientsList.length !== amountsList.length) {
+            alert("Number of recipients must match number of amounts");
+            return;
+        }
+        
+        if (!amountsValid) {
+            alert("One or more amounts are invalid");
+            return;
+        }
+
+        // Convert amounts to wei safely
+        let amountsWei: bigint[];
+        try {
+            amountsWei = amountsList.map(amt => parseUnits(amt, decimals));
+        } catch (error) {
+            alert(`Invalid amount format: ${error instanceof Error ? error.message : error}`);
+            return;
+        }
+
+        // Calculate total from valid amounts
+        const totalToSend = amountsWei.reduce((sum, amt) => sum + amt, BigInt(0));
+
         const result = await getApprovedAmount(tSenderAddress)
 
-                // Convert input amounts to wei
-        const amountsWei = amounts.split(/[,\n]+/)
-            .map(amt => amt.trim())
-            .filter(amt => amt !== '')
-            .map(amt => BigInt(parseFloat(amt) * 10 ** decimals));
-
-        if (Number(result) < Number(totalInWei) ){
+        if (result < totalToSend) {
+            // Need approval
             const approvalHash = await writeContractAsync({
                 abi: erc20Abi,
                 address: tokenAddress as `0x${string}`,
                 functionName: "approve",
-                args: [tSenderAddress as `0x${string}`, totalInWei],
+                args: [tSenderAddress as `0x${string}`, totalToSend],
             })
             const approvalReceipt = await waitForTransactionReceipt(config, {
                 hash: approvalHash,
             })
 
             console.log("Approval confirmed:", approvalReceipt)
-
-            await writeContractAsync({
-                abi: tsenderAbi,
-                address: tSenderAddress as `0x${string}`,
-                functionName: "airdropERC20",
-                args: [
-                    tokenAddress,
-                    // Comma or new line separated
-                    recipients.split(/[,\n]+/).map(addr => addr.trim()).filter(addr => addr !== ''),
-                     amountsWei, // Use converted wei amounts
-                    totalInWei,
-                ],
-            })
-        } else {
-            await writeContractAsync({
-                abi: tsenderAbi,
-                address: tSenderAddress as `0x${string}`,
-                functionName: "airdropERC20",
-                args: [
-                    tokenAddress,
-                    // Comma or new line separated
-                    recipients.split(/[,\n]+/).map(addr => addr.trim()).filter(addr => addr !== ''),
-                    amountsWei, // Use converted wei amounts
-                    totalInWei,
-                ],
-            },)
         }
 
+        // Execute airdrop
+        await writeContractAsync({
+            abi: tsenderAbi,
+            address: tSenderAddress as `0x${string}`,
+            functionName: "airdropERC20",
+            args: [
+                tokenAddress,
+                recipientsList,
+                amountsWei,
+                totalToSend,
+            ],
+        })
     }
 
-    async function getApprovedAmount(tSenderAddress: string | null): Promise<BigInt> {
-        if (!tSenderAddress) {
-            alert("This chain only has the safer version!")
-            return BigInt(0)
-        }
+    async function getApprovedAmount(tSenderAddress: string): Promise<bigint> {
         const response = await readContract(config, {
             abi: erc20Abi,
             address: tokenAddress as `0x${string}`,
             functionName: "allowance",
-            args: [account.address, tSenderAddress as `0x${string}`],
+            args: [account.address!, tSenderAddress as `0x${string}`],
         })
-        return response as BigInt
+        return response as bigint;
     }
 
     function getButtonContent() {
@@ -211,6 +236,27 @@ export default function AirdropForm({ isUnsafeMode, onModeChange }: AirdropFormP
         }
     }, [tokenAddress, totalInWei, tokenData]);
 
+    useEffect(() => {
+        if (!decimals) {
+            setAmountsError(null);
+            return;
+        }
+        
+        const amountsArray = amounts.split(/[,\n]+/)
+            .map(amt => amt.trim())
+            .filter(amt => amt !== '');
+            
+        for (const amt of amountsArray) {
+            try {
+                parseUnits(amt, decimals);
+                setAmountsError(null);
+            } catch (error) {
+                setAmountsError("Invalid amount format detected");
+                return;
+            }
+        }
+    }, [amounts, decimals]);
+
     return (
         <div
             className={`max-w-2xl min-w-full xl:min-w-lg w-full lg:mx-auto p-6 flex flex-col gap-6 bg-white rounded-xl ring-[4px] border-2 ${isUnsafeMode ? " border-red-500 ring-red-500/25" : " border-blue-500 ring-blue-500/25"}`}
@@ -244,12 +290,18 @@ export default function AirdropForm({ isUnsafeMode, onModeChange }: AirdropFormP
                     large={true}
                 />
                 <InputForm
-                    label="Amounts (wei; comma or new line separated)"
+                    label={`Amounts (comma or new line separated)${decimals ? ` - Max decimals: ${decimals}` : ''}`}
                     placeholder="100, 200, 300..."
                     value={amounts}
                     onChange={e => setAmounts(e.target.value)}
                     large={true}
                 />
+                
+                {amountsError && (
+                    <div className="text-red-500 text-sm -mt-4">
+                        {amountsError}
+                    </div>
+                )}
 
                 <div className="bg-white border border-zinc-300 rounded-lg p-4">
                     <h3 className="text-sm font-medium text-zinc-900 mb-3">Transaction Details</h3>
@@ -257,7 +309,7 @@ export default function AirdropForm({ isUnsafeMode, onModeChange }: AirdropFormP
                         <div className="flex justify-between items-center">
                             <span className="text-sm text-zinc-600">Token Name:</span>
                             <span className="font-mono text-zinc-900">
-                                {tokenData?.[1]?.result as string}
+                                {tokenData?.[1]?.result as string || 'N/A'}
                             </span>
                         </div>
                         <div className="flex justify-between items-center">
@@ -267,10 +319,14 @@ export default function AirdropForm({ isUnsafeMode, onModeChange }: AirdropFormP
                         <div className="flex justify-between items-center">
                             <span className="text-sm text-zinc-600">Amount (tokens):</span>
                             <span className="font-mono text-zinc-900">
+
                               {amounts.split(/[,\n]+/)
                                     .map(amt => amt.trim())
                                     .filter(amt => amt !== '')
-                                    .reduce((sum, amt) => sum + parseFloat(amt || '0'), 0)
+                                    .reduce((sum, amt) => {
+                                        const num = parseFloat(amt);
+                                        return sum + (isNaN(num) ? 0 : num);
+                                    }, 0)
                                     .toLocaleString()}
                             </span>
                         </div>
@@ -307,7 +363,7 @@ export default function AirdropForm({ isUnsafeMode, onModeChange }: AirdropFormP
                         : "bg-blue-500 hover:bg-blue-600 border-blue-500"
                         } ${!hasEnoughTokens && tokenAddress ? "opacity-50 cursor-not-allowed" : ""}`}
                     onClick={handleSubmit}
-                    disabled={isPending || (!hasEnoughTokens && tokenAddress !== "")}
+                    disabled={isPending || (!hasEnoughTokens && tokenAddress !== "") || !amountsValid}
                 >
                     {/* Gradient */}
                     <div className="absolute w-full inset-0 bg-gradient-to-b from-white/25 via-80% to-transparent mix-blend-overlay z-10 rounded-lg" />
@@ -319,11 +375,14 @@ export default function AirdropForm({ isUnsafeMode, onModeChange }: AirdropFormP
                         ? getButtonContent()
                         : !hasEnoughTokens && tokenAddress
                             ? "Insufficient token balance"
-                            : isUnsafeMode
-                                ? "Send Tokens (Unsafe)"
-                                : "Send Tokens"}
+                            : !amountsValid
+                                ? "Invalid amounts"
+                                : isUnsafeMode
+                                    ? "Send Tokens (Unsafe)"
+                                    : "Send Tokens"}
                 </button>
             </div>
         </div>
     )
 }
+
