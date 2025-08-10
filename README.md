@@ -1,4 +1,4 @@
-# TSender UI
+# TACC UI
 
 A 100% client-side UI for the TSender contract.
 
